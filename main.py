@@ -2,15 +2,14 @@ from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import FileResponse
 from PIL import Image
 import numpy as np
+from pathlib import Path
 import io
 import uvicorn
-from pathlib import Path
-import os
 
-app = FastAPI(title="Background Remover API")
+app = FastAPI(title="Message Bubble Processor")
 
-async def process_image(image_data: bytes, tolerance: int = 30) -> bytes:
-    """Process image data and return processed image as bytes"""
+async def process_image(image_data: bytes) -> bytes:
+    """Process message bubble image and return processed image as bytes"""
     try:
         # Open image from bytes
         img = Image.open(io.BytesIO(image_data)).convert('RGBA')
@@ -18,18 +17,17 @@ async def process_image(image_data: bytes, tolerance: int = 30) -> bytes:
         # Convert to numpy array
         data = np.array(img)
         
-        # Get background color from top-left pixel
-        bg_color = data[0, 0, :3]
+        # Calculate brightness (using standard coefficients for grayscale conversion)
+        brightness = np.sum(data[:,:,:3] * [0.299, 0.587, 0.114], axis=2)
         
-        # Create alpha mask
-        alpha = np.ones_like(data[:,:,3])
+        # Create alpha mask - keep darker pixels (text)
+        alpha = (brightness < 200).astype(np.uint8) * 255
         
-        # Make background transparent
-        for i in range(3):
-            alpha &= np.abs(data[:,:,i] - bg_color[i]) > tolerance
+        # Remove noise/gray areas
+        alpha[brightness > 150] = 0
         
         # Apply alpha mask
-        data[:,:,3] = alpha * 255
+        data[:,:,3] = alpha
         
         # Create new image
         result = Image.fromarray(data)
@@ -40,19 +38,15 @@ async def process_image(image_data: bytes, tolerance: int = 30) -> bytes:
         return img_byte_arr.getvalue()
         
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error processing image: {str(e)}")
+        raise Exception(f"Error processing image: {str(e)}")
 
 @app.post("/remove-background/")
-async def remove_background(
-    file: UploadFile = File(...),
-    tolerance: int = 30
-):
+async def remove_background(file: UploadFile = File(...)):
     """
-    Remove background from uploaded image
+    Remove background from message bubble image
     
     Parameters:
     - file: Image file (PNG or JPEG)
-    - tolerance: Color matching tolerance (0-255, default: 30)
     
     Returns:
     - PNG image with transparent background
@@ -60,34 +54,22 @@ async def remove_background(
     if not file.content_type.startswith('image/'):
         raise HTTPException(status_code=400, detail="File must be an image")
     
-    # Read file
-    contents = await file.read()
-    
-    # Process image
-    result = await process_image(contents, tolerance)
-    
-    # Create temporary file for response
-    temp_file = Path(f"/tmp/{file.filename}_processed.png")
-    temp_file.write_bytes(result)
-    
-    return FileResponse(
-        temp_file,
-        media_type='image/png',
-        filename=f"{file.filename}_nobg.png"
-    )
+    try:
+        # Read and process image
+        contents = await file.read()
+        result = await process_image(contents)
+        
+        # Create temporary file for response
+        temp_file = Path(f"/tmp/{file.filename}_processed.png")
+        temp_file.write_bytes(result)
+        
+        return FileResponse(
+            temp_file,
+            media_type='image/png',
+            filename=f"{file.filename}_nobg.png"
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-@app.get("/")
-async def root():
-    """API root - provides basic information"""
-    return {
-        "name": "Background Remover API",
-        "version": "1.0.0",
-        "endpoints": {
-            "POST /remove-background/": "Remove background from image",
-            "GET /": "This information"
-        }
-    }
-
-# For local development
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
